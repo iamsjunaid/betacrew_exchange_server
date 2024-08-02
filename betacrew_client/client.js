@@ -6,6 +6,7 @@ const host = "localhost"; // Adjust if server is on a different host
 
 const receivedPackets = {};
 let missingSequences = [];
+let dataBuffer = Buffer.alloc(0);
 
 const client = new net.Socket();
 
@@ -18,41 +19,44 @@ client.connect(port, host, () => {
 });
 
 client.on("data", (data) => {
-  console.log("Data received from server:", data);
-  processReceivedData(data);
-  // In case the second 'data' event is not triggered:
-  if (missingSequences.length === 0) {
-    client.end();
+  dataBuffer = Buffer.concat([dataBuffer, data]);
+
+  // Process data packets
+  while (dataBuffer.length >= 17) {
+    const packet = dataBuffer.slice(0, 17);
+    processReceivedData(packet);
+    dataBuffer = dataBuffer.slice(17);
   }
 });
 
-client.on("close", () => {
+client.on("end", () => {
   console.log("Connection closed");
   identifyMissingSequences();
-  console.log("Missing sequences:", missingSequences);
-  requestMissingPackets();
+  if (missingSequences.length > 0) {
+    requestMissingPackets();
+  } else {
+    generateJSONOutput();
+  }
+});
+
+client.on("error", (err) => {
+  console.error("Error:", err);
 });
 
 function processReceivedData(data) {
-  console.log("Processing received data...");
-  for (let i = 0; i < data.length; i += 17) {
-    const symbol = data.slice(i, i + 4).toString("ascii");
-    const buySell = data.slice(i + 4, i + 5).toString("ascii");
-    const quantity = data.readInt32BE(i + 5);
-    const price = data.readInt32BE(i + 9);
-    const sequence = data.readInt32BE(i + 13);
+  const symbol = data.slice(0, 4).toString("ascii").trim();
+  const buySell = data.slice(4, 5).toString("ascii").trim();
+  const quantity = data.readInt32BE(5);
+  const price = data.readInt32BE(9);
+  const sequence = data.readInt32BE(13);
 
-    receivedPackets[sequence] = { symbol, buySell, quantity, price, sequence };
-    console.log(
-      `Packet received: ${JSON.stringify(receivedPackets[sequence])}`
-    );
-  }
+  receivedPackets[sequence] = { symbol, buySell, quantity, price, sequence };
+  console.log(`Packet received: ${JSON.stringify(receivedPackets[sequence])}`);
 }
 
 function identifyMissingSequences() {
-  console.log("Identifying missing sequences...");
   const sequences = Object.keys(receivedPackets)
-    .map((seq) => parseInt(seq))
+    .map(Number)
     .sort((a, b) => a - b);
   for (let i = 0; i < sequences.length - 1; i++) {
     for (let j = sequences[i] + 1; j < sequences[i + 1]; j++) {
@@ -76,25 +80,38 @@ function requestNextMissingPacket() {
     const buffer = Buffer.alloc(2);
     buffer.writeUInt8(2, 0); // Call type 2: Resend Packet
     buffer.writeUInt8(sequence, 1);
-    client.write(buffer);
+
+    // Create a new socket for requesting missing packets
+    const requestClient = new net.Socket();
+
+    requestClient.connect(port, host, () => {
+      requestClient.write(buffer);
+    });
+
+    requestClient.on("data", (data) => {
+      processReceivedData(data);
+      requestClient.end(); // Close the request socket after receiving data
+    });
+
+    requestClient.on("end", () => {
+      if (missingSequences.length > 0) {
+        requestNextMissingPacket();
+      } else {
+        generateJSONOutput();
+      }
+    });
+
+    requestClient.on("error", (err) => {
+      console.error("Error in request client:", err);
+    });
   } else {
     generateJSONOutput();
   }
 }
-
-client.on("data", (data) => {
-  processReceivedData(data);
-  if (missingSequences.length > 0) {
-    requestNextMissingPacket();
-  } else {
-    generateJSONOutput();
-  }
-});
 
 function generateJSONOutput() {
   console.log("Generating JSON output...");
   const output = Object.values(receivedPackets);
   fs.writeFileSync("output.json", JSON.stringify(output, null, 2));
   console.log("Output JSON generated");
-  client.destroy();
 }
