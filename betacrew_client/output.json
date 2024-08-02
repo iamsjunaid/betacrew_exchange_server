@@ -1,0 +1,9 @@
+[
+  {
+    "symbol": "AAPL",
+    "buySell": "B",
+    "quantity": 50,
+    "price": 100,
+    "sequence": 1
+  }
+]
